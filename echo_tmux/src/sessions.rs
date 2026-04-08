@@ -43,6 +43,7 @@ pub async fn start_or_reuse_session(_home: PathBuf, name: &str, _initial_command
 /// Send a command to tmux session and return ONLY the new output
 /// Send command to tmux session and return only the new output
 /// Send command and capture ONLY the fresh output after the marker
+/// Send command and capture ONLY the fresh output using markers
 pub async fn execute_in_session(_home: PathBuf, session_name: &str, command: String) -> Result<String> {
     let sessions = ACTIVE_SESSIONS.lock().await;
     if !sessions.contains_key(session_name) {
@@ -50,54 +51,63 @@ pub async fn execute_in_session(_home: PathBuf, session_name: &str, command: Str
     }
     drop(sessions);
 
-    // Unique marker to find where the new output starts
-    let marker = format!("===ECHO_START_{}===", std::time::SystemTime::now()
+    // Unique start and end markers
+    let start_marker = format!("===ECHO_START_{}===", std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis());
 
-    // Send: marker + command
-    let input = format!("echo '{}'\n{}", marker, command);
+    let end_marker = format!("===ECHO_END_{}===", std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() + 1);
+
+    // Send: start_marker + command + end_marker
+    let input = format!("echo '{}'\n{}\necho '{}'", start_marker, command, end_marker);
 
     let _ = Command::new("tmux")
         .args(["send-keys", "-t", session_name, &input, "Enter"])
         .status();
 
-    // Wait for output
-    sleep(Duration::from_millis(1100)).await;
+    // Wait longer for long-running commands
+    sleep(Duration::from_millis(1500)).await;
 
-    // Capture recent pane content
+    // Capture recent output
     let output = Command::new("tmux")
-        .args(["capture-pane", "-p", "-S", "-100", "-t", session_name])
+        .args(["capture-pane", "-p", "-S", "-150", "-t", session_name])
         .output()?;
 
     let raw = String::from_utf8_lossy(&output.stdout).to_string();
 
-    // Find the marker and take everything AFTER it
-    if let Some(marker_pos) = raw.find(&marker) {
-        let after_marker = &raw[marker_pos + marker.len()..];
+    // Extract text BETWEEN start_marker and end_marker
+    if let Some(start_pos) = raw.find(&start_marker) {
+        let after_start = &raw[start_pos + start_marker.len()..];
+        if let Some(end_pos) = after_start.find(&end_marker) {
+            let fresh_output = &after_start[0..end_pos];
 
-        let cleaned: String = after_marker
-            .lines()
-            .filter(|line| {
-                let l = line.trim();
-                !l.is_empty()
-                    && !l.ends_with('$')
-                    && !l.starts_with("eric@")
-                    && !l.contains(marker.trim())
-                    && !l.contains("===ECHO_START")
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+            let cleaned: String = fresh_output
+                .lines()
+                .filter(|line| {
+                    let l = line.trim();
+                    !l.is_empty()
+                        && !l.ends_with('$')
+                        && !l.starts_with("eric@")
+                        && !l.contains(start_marker.trim())
+                        && !l.contains(end_marker.trim())
+                        && !l.contains("Echo:")
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
 
-        let final_output = cleaned.trim();
-        if !final_output.is_empty() {
-            return Ok(final_output.to_string());
+            let final_output = cleaned.trim();
+            if !final_output.is_empty() {
+                return Ok(final_output.to_string());
+            }
         }
     }
 
-    // Fallback if marker method fails
-    Ok(format!("(Command completed: {})", command))
+    // Fallback
+    Ok(format!("Command '{}' completed in session '{}'.", command, session_name))
 }
 
 /// End / kill a tmux session gracefully
