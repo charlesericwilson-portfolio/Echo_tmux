@@ -1,14 +1,14 @@
 // log.rs
-use std::fs::OpenOptions;
-use std::io::Write;
 use std::path::PathBuf;
+use tokio::fs::OpenOptions;
+use tokio::io::AsyncWriteExt;
 use anyhow::Result;
+use serde_json::json;
 
 pub async fn save_chat_log_entry(
     log_dir: &PathBuf,
     user_message: &str,
     assistant_response: &str,
-    from: &str,
 ) -> Result<()> {
     tokio::fs::create_dir_all(log_dir).await?;
 
@@ -16,42 +16,37 @@ pub async fn save_chat_log_entry(
 
     let mut messages = Vec::new();
 
-    if !user_message.is_empty() {
-        messages.push(format!(
-            r#"{{"role": "user", "content": "{}"}}"#,
-            user_message.trim().replace('"', r#"\""#)
-        ));
+    if !user_message.trim().is_empty() {
+        messages.push(json!({
+            "role": "user",
+            "content": user_message.trim()
+        }));
     }
 
-    if !assistant_response.is_empty() {
-        let content = if from.contains("SESSION_START") {
-            "=== SESSION START ==="
-        } else if from.contains("SESSION_END") {
-            "=== SESSION END ==="
-        } else if !from.is_empty() && from != "main" && from != "assistant" && from != "user" {
-            &format!("Session: {}", from)
-        } else {
-            assistant_response.trim()
-        };
-
-        messages.push(format!(
-            r#"{{"role": "assistant", "content": "{}"}}"#,
-            content.replace('"', r#"\""#)
-        ));
+    if !assistant_response.trim().is_empty() {
+        messages.push(json!({
+            "role": "assistant",
+            "content": assistant_response.trim()
+        }));
     }
 
-    let messages_str = messages.join(",");
+    if messages.is_empty() {
+        return Ok(());
+    }
 
-    let log_line = format!(r#"{{"messages": [{}]}}"#, messages_str);
+    let log_entry = json!({
+        "messages": messages
+    });
 
     let mut file = OpenOptions::new()
-        .append(true)
         .create(true)
+        .append(true)
         .open(&file_path)
-        .map_err(|e| anyhow::anyhow!("Failed to open {}: {}", file_path.display(), e))?;
+        .await?;
 
-    writeln!(file, "{}", log_line)
-        .map_err(|e| anyhow::anyhow!("Failed to write log: {}", e))?;
+    let line = format!("{}\n", log_entry.to_string());
+    file.write_all(line.as_bytes()).await?;
+    file.flush().await?;
 
     Ok(())
 }
